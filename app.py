@@ -220,9 +220,9 @@ with tab_history:
         st.info("Nog geen rondes geïmporteerd. Gebruik het Upload-tabblad.")
     else:
         for r in rounds:
+            datum = r["round_date"] or "datum onbekend"
             col_a, col_b = st.columns([5, 1])
             with col_a:
-                datum = r["round_date"] or "datum onbekend"
                 st.markdown(
                     f"**{r['filename']}** — {datum}  \n"
                     f"*{r['num_groups']} groepen · {r['num_members']} deelnames · "
@@ -232,6 +232,13 @@ with tab_history:
                 if st.button("🗑️ Verwijder", key=f"del_{r['id']}"):
                     db.delete_round(r["id"])
                     st.rerun()
+            with st.expander("Bekijk flights"):
+                groups = db.get_groups_for_round(r["id"])
+                for g in groups:
+                    label = g["tee_time"] or g["slot_label"] or "–"
+                    players_str = "  ·  ".join(display_name(p) for p in g["players"])
+                    st.markdown(f"**{label}** &nbsp; {players_str}")
+            st.divider()
 
 # ---------------------------------------------------------------------------
 # TAB: SEARCH
@@ -291,6 +298,21 @@ with tab_search:
                                 )
                         else:
                             st.info("Geen teetime-data beschikbaar.")
+
+                    st.markdown("#### Alle rondes")
+                    player_rounds = db.get_player_rounds(selected)
+                    if not player_rounds:
+                        st.info("Geen rondes gevonden.")
+                    else:
+                        for pr in player_rounds:
+                            datum = pr["round_date"] or "datum onbekend"
+                            tijd = pr["tee_time"] or pr["slot_label"] or "–"
+                            partners = "  ·  ".join(display_name(p) for p in pr["co_players"]) or "–"
+                            st.markdown(
+                                f"**{datum}** &nbsp; {tijd} &nbsp; — &nbsp; {pr['filename']}  \n"
+                                f"<small>Flight met: {partners}</small>",
+                                unsafe_allow_html=True,
+                            )
 
 # ---------------------------------------------------------------------------
 # TAB: WIE SPEELT GOED SAMEN?

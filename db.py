@@ -169,6 +169,64 @@ def get_pair_frequencies(players: list[str]) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_groups_for_round(round_id: int) -> list[dict]:
+    """Return all groups with their members for a given round."""
+    with get_connection() as conn:
+        groups = conn.execute(
+            "SELECT id, tee_time, slot_label FROM groups WHERE round_id = ? ORDER BY tee_time, slot_label",
+            (round_id,),
+        ).fetchall()
+        result = []
+        for g in groups:
+            members = conn.execute(
+                "SELECT player_name FROM group_members WHERE group_id = ? ORDER BY player_name",
+                (g["id"],),
+            ).fetchall()
+            result.append({
+                "tee_time": g["tee_time"],
+                "slot_label": g["slot_label"],
+                "players": [m["player_name"] for m in members],
+            })
+    return result
+
+
+def get_player_rounds(player: str) -> list[dict]:
+    """Return all rounds a player participated in, with flight details."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                r.id          AS round_id,
+                r.filename,
+                r.round_date,
+                g.tee_time,
+                g.slot_label,
+                g.id          AS group_id
+            FROM group_members m
+            JOIN groups g  ON m.group_id  = g.id
+            JOIN rounds r  ON g.round_id  = r.id
+            WHERE m.player_name = ?
+            ORDER BY r.round_date DESC, r.uploaded_at DESC, g.tee_time
+            """,
+            (player,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            co_players = conn.execute(
+                "SELECT player_name FROM group_members WHERE group_id = ? AND player_name != ? ORDER BY player_name",
+                (row["group_id"], player),
+            ).fetchall()
+            result.append({
+                "round_id": row["round_id"],
+                "filename": row["filename"],
+                "round_date": row["round_date"],
+                "tee_time": row["tee_time"],
+                "slot_label": row["slot_label"],
+                "co_players": [r["player_name"] for r in co_players],
+            })
+    return result
+
+
 def get_rounds_summary() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
