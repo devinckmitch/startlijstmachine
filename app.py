@@ -32,25 +32,27 @@ tab_upload, tab_history, tab_search, tab_info = st.tabs(
 with tab_upload:
     st.header("Startlijst importeren")
 
-    uploaded_file = st.file_uploader(
-        "Kies een startlijst (.xlsx, .xls of .csv)",
+    uploaded_files = st.file_uploader(
+        "Kies één of meerdere startlijsten (.xlsx, .xls of .csv)",
         type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
         key="uploader",
     )
 
-    if uploaded_file is not None:
-        file_bytes = uploaded_file.read()
-        filename = uploaded_file.name
-
-        # --- Step 1: raw preview ---
-        st.subheader("Stap 1 – Ruwe data")
+    if uploaded_files:
+        # --- Step 1: raw preview van eerste bestand ---
+        st.subheader("Stap 1 – Ruwe data (eerste bestand)")
+        first_file = uploaded_files[0]
         try:
-            raw_df = load_raw(file_bytes, filename)
+            raw_df = load_raw(first_file.read(), first_file.name)
+            first_file.seek(0)
         except Exception as e:
             st.error(f"Kon het bestand niet inladen: {e}")
             st.stop()
 
         st.dataframe(raw_df.head(20), use_container_width=True)
+        if len(uploaded_files) > 1:
+            st.info(f"{len(uploaded_files)} bestanden geselecteerd. Kolom-instellingen gelden voor alle bestanden.")
 
         # --- Step 2: header row ---
         st.subheader("Stap 2 – Kies de headerrij")
@@ -99,43 +101,62 @@ with tab_upload:
 
         time_col = None if time_col_sel == none_option else time_col_sel
 
-        # Optional: date
-        detected_date = try_parse_date_from_filename(filename)
-        round_date = st.date_input(
-            "Datum van de ronde (optioneel)",
-            value=pd.to_datetime(detected_date).date() if detected_date else None,
-        )
-        round_date_str = round_date.isoformat() if round_date else None
-
-        # --- Step 4: preview parsed groups ---
+        # --- Step 4: verwerk alle bestanden ---
         st.subheader("Stap 4 – Preview geparseerde groepen")
-        try:
-            groups = parse_groups(df, time_col, group_col_sel, name_col_sel)
-        except Exception as e:
-            st.error(f"Fout bij verwerking: {e}")
-            st.stop()
 
-        if not groups:
+        all_file_results = []
+        errors = []
+        for uf in uploaded_files:
+            try:
+                fb = uf.read()
+                rdf = load_raw(fb, uf.name)
+                fdf = apply_header(rdf, int(header_row))
+                grps = parse_groups(fdf, time_col, group_col_sel, name_col_sel)
+                detected_date = try_parse_date_from_filename(uf.name)
+                all_file_results.append({
+                    "filename": uf.name,
+                    "groups": grps,
+                    "detected_date": detected_date,
+                })
+            except Exception as e:
+                errors.append(f"**{uf.name}**: {e}")
+
+        if errors:
+            for err in errors:
+                st.error(f"Fout bij inladen {err}")
+
+        total_groups = sum(len(r["groups"]) for r in all_file_results)
+
+        if not all_file_results or total_groups == 0:
             st.warning("Geen geldige groepen gevonden. Controleer de kolommen.")
         else:
+            # Preview eerste 5 groepen van eerste bestand
             preview_rows = []
-            for g in groups[:5]:
+            for g in all_file_results[0]["groups"][:5]:
                 preview_rows.append({
+                    "Bestand": all_file_results[0]["filename"],
                     "Tijd": g["tee_time"] or "–",
                     "Spelers": ", ".join(display_name(p) for p in g["players"]),
                 })
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
-            st.info(f"Totaal: **{len(groups)} groepen** gevonden in dit bestand.")
+            st.info(
+                f"Totaal: **{total_groups} groepen** in **{len(all_file_results)} bestand(en)**."
+            )
 
             # --- Step 5: confirm ---
             st.subheader("Stap 5 – Importeren")
             if st.button("✅ Bevestig import", type="primary"):
-                round_id = db.insert_round(filename, round_date_str)
-                for g in groups:
-                    group_id = db.insert_group(round_id, g["tee_time"], g["slot_label"])
-                    db.insert_members(group_id, g["players"])
+                imported = 0
+                for result in all_file_results:
+                    detected_date = result["detected_date"]
+                    round_date_str = pd.to_datetime(detected_date).date().isoformat() if detected_date else None
+                    round_id = db.insert_round(result["filename"], round_date_str)
+                    for g in result["groups"]:
+                        group_id = db.insert_group(round_id, g["tee_time"], g["slot_label"])
+                        db.insert_members(group_id, g["players"])
+                    imported += len(result["groups"])
                 st.success(
-                    f"Import geslaagd! {len(groups)} groepen opgeslagen uit '{filename}'."
+                    f"Import geslaagd! {imported} groepen opgeslagen uit {len(all_file_results)} bestand(en)."
                 )
                 st.balloons()
 
