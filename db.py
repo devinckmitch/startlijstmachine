@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import hashlib
 from pathlib import Path
 
 # On Streamlit Cloud the app directory is read-only; use the home dir instead.
@@ -16,6 +17,10 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def file_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.executescript("""
@@ -23,6 +28,7 @@ def init_db() -> None:
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename    TEXT NOT NULL,
                 round_date  TEXT,
+                file_hash   TEXT,
                 uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -42,13 +48,28 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_member_name  ON group_members(player_name);
             CREATE INDEX IF NOT EXISTS idx_member_group ON group_members(group_id);
         """)
+        # Migration: add file_hash column to existing databases
+        try:
+            conn.execute("ALTER TABLE rounds ADD COLUMN file_hash TEXT")
+        except Exception:
+            pass
 
 
-def insert_round(filename: str, round_date: str | None) -> int:
+def find_round_by_hash(h: str) -> dict | None:
+    """Return existing round info if this file was already imported."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, filename, round_date, uploaded_at FROM rounds WHERE file_hash = ?",
+            (h,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_round(filename: str, round_date: str | None, h: str | None = None) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO rounds (filename, round_date) VALUES (?, ?)",
-            (filename, round_date),
+            "INSERT INTO rounds (filename, round_date, file_hash) VALUES (?, ?, ?)",
+            (filename, round_date, h),
         )
         return cur.lastrowid
 
@@ -112,9 +133,38 @@ def get_tee_time_distribution(player: str) -> list[dict]:
             WHERE m.player_name = ?
               AND g.tee_time IS NOT NULL
             GROUP BY g.tee_time
-            ORDER BY g.tee_time
+            ORDER BY
+                CASE WHEN g.tee_time GLOB '[0-9][0-9]:[0-9][0-9]'
+                     THEN g.tee_time
+                     ELSE '99:99'
+                END
             """,
             (player,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_pair_frequencies(players: list[str]) -> list[dict]:
+    """How often did each pair from the given player list play in the same group?"""
+    if len(players) < 2:
+        return []
+    placeholders = ",".join("?" * len(players))
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT m1.player_name AS player1,
+                   m2.player_name AS player2,
+                   COUNT(*)       AS times_together
+            FROM group_members m1
+            JOIN group_members m2
+                ON  m1.group_id    = m2.group_id
+                AND m1.player_name < m2.player_name
+            WHERE m1.player_name IN ({placeholders})
+              AND m2.player_name IN ({placeholders})
+            GROUP BY m1.player_name, m2.player_name
+            ORDER BY times_together DESC
+            """,
+            players + players,
         ).fetchall()
     return [dict(r) for r in rows]
 

@@ -51,3 +51,35 @@ def get_tee_time_table(player: str) -> list[dict]:
         {"Tijd": r["tee_time"], "Keer gespeeld": r["appearances"]}
         for r in rows
     ]
+
+
+def get_tee_time_by_hour(player: str) -> list[dict]:
+    """Group tee times into hourly blocks, e.g. '09:10' and '09:40' → '09:00'."""
+    rows = db.get_tee_time_distribution(player)
+    by_hour: dict[str, int] = {}
+    for r in rows:
+        t = r["tee_time"] or ""
+        if len(t) >= 2 and t[:2].isdigit():
+            hour_block = t[:2] + ":00"
+        else:
+            hour_block = t or "?"
+        by_hour[hour_block] = by_hour.get(hour_block, 0) + r["appearances"]
+    return [{"Uur": h, "Keer gespeeld": c} for h, c in sorted(by_hour.items())]
+
+
+def get_pair_frequencies(players: list[str]) -> list[dict]:
+    """
+    For a given list of players, return how often each pair played together.
+    Returns list of {"Speler 1", "Speler 2", "Keer samen"}, sorted descending.
+    """
+    if len(players) < 2:
+        return []
+    rows = db.get_pair_frequencies(players)
+    return [
+        {
+            "Speler 1": display_name(r["player1"]),
+            "Speler 2": display_name(r["player2"]),
+            "Keer samen": r["times_together"],
+        }
+        for r in rows
+    ]

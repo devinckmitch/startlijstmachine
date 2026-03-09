@@ -324,6 +324,32 @@ class TestDbInit:
         assert {"rounds", "groups", "group_members"}.issubset(names)
 
 
+class TestDbHash:
+    def test_file_hash_is_deterministic(self):
+        data = b"hello world"
+        assert db_module.file_hash(data) == db_module.file_hash(data)
+
+    def test_different_data_different_hash(self):
+        assert db_module.file_hash(b"a") != db_module.file_hash(b"b")
+
+    def test_find_round_by_hash_returns_none_when_absent(self, tmp_db):
+        assert db_module.find_round_by_hash("nonexistent") is None
+
+    def test_find_round_by_hash_returns_match(self, tmp_db):
+        h = db_module.file_hash(b"testdata")
+        db_module.insert_round("r.csv", None, h)
+        result = db_module.find_round_by_hash(h)
+        assert result is not None
+        assert result["filename"] == "r.csv"
+
+    def test_duplicate_import_detectable(self, tmp_db):
+        data = b"some csv content"
+        h = db_module.file_hash(data)
+        db_module.insert_round("r1.csv", None, h)
+        # Same hash → already imported
+        assert db_module.find_round_by_hash(h) is not None
+
+
 class TestDbCrud:
     def test_insert_and_query_round(self, tmp_db):
         rid = db_module.insert_round("test.csv", "2024-03-15")
@@ -497,3 +523,106 @@ class TestGetTeeTimeTable:
 
     def test_empty_for_unknown(self, tmp_db):
         assert analysis.get_tee_time_table("onbekend") == []
+
+    def test_sorted_correctly(self, tmp_db):
+        # "10:00" should sort after "09:xx", not before (lexicographic trap)
+        rid = db_module.insert_round("r.csv", None)
+        for tee, names in [("10:00", ["adams karl", "b"]),
+                            ("09:10", ["adams karl", "c"])]:
+            gid = db_module.insert_group(rid, tee, tee)
+            db_module.insert_members(gid, names)
+        table = analysis.get_tee_time_table("adams karl")
+        times = [r["Tijd"] for r in table]
+        assert times == sorted(times)
+
+
+class TestGetTeeTimeByHour:
+    def test_groups_into_hour_blocks(self, tmp_db):
+        rid = db_module.insert_round("r.csv", None)
+        for tee, names in [("09:10", ["adams karl", "b"]),
+                            ("09:40", ["adams karl", "c"]),
+                            ("10:00", ["adams karl", "d"])]:
+            gid = db_module.insert_group(rid, tee, tee)
+            db_module.insert_members(gid, names)
+        data = analysis.get_tee_time_by_hour("adams karl")
+        by_hour = {r["Uur"]: r["Keer gespeeld"] for r in data}
+        assert by_hour["09:00"] == 2  # 09:10 + 09:40
+        assert by_hour["10:00"] == 1
+
+    def test_sorted_by_hour(self, tmp_db):
+        rid = db_module.insert_round("r.csv", None)
+        for tee, names in [("11:00", ["adams karl", "b"]),
+                            ("08:30", ["adams karl", "c"])]:
+            gid = db_module.insert_group(rid, tee, tee)
+            db_module.insert_members(gid, names)
+        data = analysis.get_tee_time_by_hour("adams karl")
+        hours = [r["Uur"] for r in data]
+        assert hours == sorted(hours)
+
+    def test_empty_for_unknown(self, tmp_db):
+        assert analysis.get_tee_time_by_hour("onbekend") == []
+
+
+class TestParseGroupsMinSize:
+    def _make_df(self, rows):
+        return pd.DataFrame(rows, columns=["Flight", "Naam", "Tijd"])
+
+    def test_min_size_1_includes_solos(self):
+        df = self._make_df([["1", "adams karl", "09:10"]])
+        groups = parse_groups(df, "Tijd", "Flight", "Naam", min_group_size=1)
+        assert len(groups) == 1
+
+    def test_min_size_4_filters_smaller_groups(self):
+        df = self._make_df([
+            ["1", "a", "09:10"],
+            ["1", "b", "09:10"],
+            ["1", "c", "09:10"],
+            ["2", "d", "09:20"],
+            ["2", "e", "09:20"],
+            ["2", "f", "09:20"],
+            ["2", "g", "09:20"],
+        ])
+        groups = parse_groups(df, "Tijd", "Flight", "Naam", min_group_size=4)
+        assert len(groups) == 1
+        assert len(groups[0]["players"]) == 4
+
+
+class TestGetPairFrequencies:
+    def test_basic_pair(self, tmp_db):
+        rid = db_module.insert_round("r.csv", None)
+        gid = db_module.insert_group(rid, "09:10", "09:10")
+        db_module.insert_members(gid, ["adams karl", "peeters luc", "janssen ann"])
+        rows = db_module.get_pair_frequencies(["adams karl", "peeters luc", "janssen ann"])
+        assert len(rows) == 3  # 3 pairs from 3 players
+        assert rows[0]["times_together"] == 1
+
+    def test_pair_counted_multiple_rounds(self, tmp_db):
+        for i in range(3):
+            rid = db_module.insert_round(f"r{i}.csv", None)
+            gid = db_module.insert_group(rid, "09:10", "09:10")
+            db_module.insert_members(gid, ["adams karl", "peeters luc"])
+        rows = db_module.get_pair_frequencies(["adams karl", "peeters luc"])
+        assert rows[0]["times_together"] == 3
+
+    def test_pair_not_in_list_excluded(self, tmp_db):
+        rid = db_module.insert_round("r.csv", None)
+        gid = db_module.insert_group(rid, "09:10", "09:10")
+        db_module.insert_members(gid, ["adams karl", "peeters luc", "outsider"])
+        # Only query adams+peeters, outsider should not appear
+        rows = db_module.get_pair_frequencies(["adams karl", "peeters luc"])
+        partners = [(r["player1"], r["player2"]) for r in rows]
+        assert all("outsider" not in pair for pair in partners)
+
+    def test_less_than_two_players_returns_empty(self, tmp_db):
+        assert db_module.get_pair_frequencies([]) == []
+        assert db_module.get_pair_frequencies(["adams karl"]) == []
+
+    def test_analysis_layer_format(self, tmp_db):
+        rid = db_module.insert_round("r.csv", None)
+        gid = db_module.insert_group(rid, "09:10", "09:10")
+        db_module.insert_members(gid, ["adams karl", "peeters luc"])
+        result = analysis.get_pair_frequencies(["adams karl", "peeters luc"])
+        assert len(result) == 1
+        assert result[0]["Speler 1"] == "Adams Karl"
+        assert result[0]["Speler 2"] == "Peeters Luc"
+        assert result[0]["Keer samen"] == 1

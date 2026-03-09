@@ -22,8 +22,8 @@ db.init_db()
 st.title("⛳ Startlijstmachine")
 st.caption("Upload golf-startlijsten, ontdek speelpartners en teetime-voorkeuren.")
 
-tab_upload, tab_history, tab_search, tab_info = st.tabs(
-    ["📤 Upload", "📋 Geschiedenis", "🔍 Zoeken", "ℹ️ Info"]
+tab_upload, tab_history, tab_search, tab_samen, tab_info = st.tabs(
+    ["📤 Upload", "📋 Geschiedenis", "🔍 Zoeken", "🤝 Wie samen?", "ℹ️ Info"]
 )
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,22 @@ with tab_upload:
     if uploaded_files:
         # Read all bytes upfront so seek/rerun issues don't matter
         files_data = [(uf.name, uf.read()) for uf in uploaded_files]
+
+        # --- Duplicate check ---
+        duplicates = []
+        for fname, fbytes in files_data:
+            h = db.file_hash(fbytes)
+            existing = db.find_round_by_hash(h)
+            if existing:
+                duplicates.append((fname, existing))
+
+        if duplicates:
+            for fname, ex in duplicates:
+                st.warning(
+                    f"**{fname}** werd al eerder geïmporteerd "
+                    f"(als '{ex['filename']}' op {ex['uploaded_at'][:16]}). "
+                    "Dit bestand wordt overgeslagen tenzij je het toch importeert."
+                )
 
         # --- Step 1: raw preview van eerste bestand ---
         st.subheader("Stap 1 – Ruwe data (eerste bestand)")
@@ -70,7 +86,7 @@ with tab_upload:
 
         st.write("**Kolommen gevonden:**", list(df.columns))
 
-        # --- Step 3: column mapping ---
+        # --- Step 3: column mapping + groepsgrootte ---
         st.subheader("Stap 3 – Kolommen koppelen")
 
         all_cols = list(df.columns)
@@ -81,7 +97,7 @@ with tab_upload:
         default_group = detect_column(df, ["Flight", "Groep", "Group", "Vlucht"])
         default_name  = detect_column(df, ["Player", "Speler", "Name", "Naam", "Spelers"])
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             time_col_sel = st.selectbox(
                 "Teetime kolom",
@@ -100,11 +116,23 @@ with tab_upload:
                 all_cols,
                 index=all_cols.index(default_name) if default_name else 0,
             )
+        with col4:
+            min_group_size = st.number_input(
+                "Min. spelers per groep",
+                min_value=1,
+                max_value=8,
+                value=2,
+                step=1,
+                help="Groepen met minder spelers worden niet opgeslagen.",
+            )
 
         time_col = None if time_col_sel == none_option else time_col_sel
 
         # --- Step 4: verwerk alle bestanden ---
         st.subheader("Stap 4 – Preview geparseerde groepen")
+
+        dup_hashes = {db.file_hash(fbytes) for _, fbytes in files_data
+                      if db.find_round_by_hash(db.file_hash(fbytes))}
 
         all_file_results = []
         errors = []
@@ -112,17 +140,18 @@ with tab_upload:
             try:
                 rdf = load_raw(fbytes, fname)
                 fdf = apply_header(rdf, int(header_row))
-                # Validate that required columns exist in this file
                 missing = [c for c in [group_col_sel, name_col_sel, time_col] if c and c not in fdf.columns]
                 if missing:
                     errors.append(f"**{fname}**: kolommen niet gevonden: {missing} (beschikbaar: {list(fdf.columns)[:8]}…)")
                     continue
-                grps = parse_groups(fdf, time_col, group_col_sel, name_col_sel)
+                grps = parse_groups(fdf, time_col, group_col_sel, name_col_sel, int(min_group_size))
                 detected_date = try_parse_date_from_filename(fname)
                 all_file_results.append({
                     "filename": fname,
+                    "file_hash": db.file_hash(fbytes),
                     "groups": grps,
                     "detected_date": detected_date,
+                    "is_duplicate": db.file_hash(fbytes) in dup_hashes,
                 })
             except Exception as e:
                 errors.append(f"**{fname}**: {e}")
@@ -136,14 +165,16 @@ with tab_upload:
         if not all_file_results or total_groups == 0:
             st.warning("Geen geldige groepen gevonden. Controleer de kolommen.")
         else:
-            # Per-file summary
             summary_rows = [
-                {"Bestand": r["filename"], "Groepen": len(r["groups"])}
+                {
+                    "Bestand": r["filename"],
+                    "Groepen": len(r["groups"]),
+                    "Al geïmporteerd": "⚠️ ja" if r["is_duplicate"] else "nee",
+                }
                 for r in all_file_results
             ]
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-            # Preview eerste 5 groepen van eerste bestand
             preview_rows = []
             for g in all_file_results[0]["groups"][:5]:
                 preview_rows.append({
@@ -152,25 +183,30 @@ with tab_upload:
                 })
             st.caption(f"Eerste 5 groepen uit '{all_file_results[0]['filename']}':")
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
-            st.info(
-                f"Totaal: **{total_groups} groepen** in **{len(all_file_results)} bestand(en)**."
-            )
+            st.info(f"Totaal: **{total_groups} groepen** in **{len(all_file_results)} bestand(en)**.")
 
             # --- Step 5: confirm ---
             st.subheader("Stap 5 – Importeren")
+            skip_duplicates = st.checkbox("Sla al geïmporteerde bestanden over", value=True)
+
             if st.button("✅ Bevestig import", type="primary"):
                 imported = 0
+                skipped = 0
                 for result in all_file_results:
+                    if skip_duplicates and result["is_duplicate"]:
+                        skipped += 1
+                        continue
                     detected_date = result["detected_date"]
                     round_date_str = pd.to_datetime(detected_date).date().isoformat() if detected_date else None
-                    round_id = db.insert_round(result["filename"], round_date_str)
+                    round_id = db.insert_round(result["filename"], round_date_str, result["file_hash"])
                     for g in result["groups"]:
                         group_id = db.insert_group(round_id, g["tee_time"], g["slot_label"])
                         db.insert_members(group_id, g["players"])
                     imported += len(result["groups"])
-                st.success(
-                    f"Import geslaagd! {imported} groepen opgeslagen uit {len(all_file_results)} bestand(en)."
-                )
+                msg = f"Import geslaagd! {imported} groepen opgeslagen."
+                if skipped:
+                    msg += f" {skipped} duplicaat bestand(en) overgeslagen."
+                st.success(msg)
                 st.balloons()
 
 # ---------------------------------------------------------------------------
@@ -240,14 +276,57 @@ with tab_search:
                             st.info("Geen speelpartners gevonden.")
 
                     with col_right:
-                        st.markdown("#### Teetime-voorkeur")
-                        tee_data = analysis.get_tee_time_table(selected)
-                        if tee_data:
-                            tee_df = pd.DataFrame(tee_data).set_index("Tijd")
-                            st.bar_chart(tee_df["Keer gespeeld"])
-                            st.dataframe(tee_df, use_container_width=True)
+                        st.markdown("#### Teetime-voorkeur per uur")
+                        hour_data = analysis.get_tee_time_by_hour(selected)
+                        if hour_data:
+                            hour_df = pd.DataFrame(hour_data).set_index("Uur")
+                            st.bar_chart(hour_df["Keer gespeeld"])
+
+                            with st.expander("Bekijk per exact tijdstip"):
+                                tee_data = analysis.get_tee_time_table(selected)
+                                st.dataframe(
+                                    pd.DataFrame(tee_data),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
                         else:
                             st.info("Geen teetime-data beschikbaar.")
+
+# ---------------------------------------------------------------------------
+# TAB: WIE SPEELT GOED SAMEN?
+# ---------------------------------------------------------------------------
+with tab_samen:
+    st.header("Wie speelt goed samen?")
+    st.caption("Selecteer 2 of meer spelers en zie hoe vaak elk koppel samen in een flight stond.")
+
+    all_players_samen = db.get_all_players()
+
+    if not all_players_samen:
+        st.info("Nog geen spelers in de database. Upload eerst een startlijst.")
+    else:
+        selected_players = st.multiselect(
+            "Kies spelers",
+            options=all_players_samen,
+            format_func=display_name,
+            placeholder="Typ een naam om te zoeken…",
+        )
+
+        if len(selected_players) < 2:
+            st.info("Selecteer minimaal 2 spelers.")
+        else:
+            pair_data = analysis.get_pair_frequencies(selected_players)
+            if not pair_data:
+                st.warning("Deze spelers hebben nog nooit samen in een flight gestaan.")
+            else:
+                st.dataframe(
+                    pd.DataFrame(pair_data),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                # Visual: bar chart per pair
+                chart_df = pd.DataFrame(pair_data)
+                chart_df["Koppel"] = chart_df["Speler 1"] + " & " + chart_df["Speler 2"]
+                st.bar_chart(chart_df.set_index("Koppel")["Keer samen"])
 
 # ---------------------------------------------------------------------------
 # TAB: INFO
@@ -258,18 +337,20 @@ with tab_info:
 **Startlijstmachine** analyseert golf-startlijsten en helpt je ontdekken:
 - met wie een speler het vaakst speelt
 - op welke tijdstippen een speler het liefst op de baan staat
+- welke koppels het vaakst samen in een flight staan
 
 ---
 
 ### Hoe werkt het?
 
-1. **Upload** een startlijst in Excel-formaat (.xlsx of .xls)
+1. **Upload** een startlijst (.xlsx, .xls of .csv)
 2. Koppel de juiste kolommen (teetime, groepsnummer, naam)
 3. **Zoek** op een speler om de resultaten te zien
+4. Gebruik **Wie samen?** om meerdere spelers te vergelijken
 
 ---
 
-### Verwacht Excel-formaat
+### Verwacht bestandsformaat
 
 Het systeem verwacht een tabel waarbij **elke rij één speler** is, met kolommen zoals:
 
@@ -286,5 +367,6 @@ Spelers in dezelfde **Flight** met dezelfde **Start**-tijd worden als groep besc
 ### Tips
 - Kolommen mogen andere namen hebben; je kan ze handmatig koppelen bij het uploaden
 - Meerdere bestanden uploaden = cumulatieve analyse over alle rondes
+- Dubbele bestanden worden automatisch herkend en kunnen overgeslagen worden
 - Gebruik de **Geschiedenis**-tab om rondes te verwijderen
 """)

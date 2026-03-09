@@ -76,6 +76,7 @@ def parse_groups(
     time_col: str | None,
     group_col: str,
     name_col: str,
+    min_group_size: int = 2,
 ) -> list[dict]:
     """
     Returns a list of groups:
@@ -107,7 +108,7 @@ def parse_groups(
     result = []
     for key, players in groups.items():
         unique_players = list(dict.fromkeys(players))  # deduplicate, preserve order
-        if len(unique_players) < 2:
+        if len(unique_players) < min_group_size:
             continue
         result.append({**group_meta[key], "players": unique_players})
     return result
