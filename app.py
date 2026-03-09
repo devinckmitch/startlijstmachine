@@ -40,12 +40,14 @@ with tab_upload:
     )
 
     if uploaded_files:
+        # Read all bytes upfront so seek/rerun issues don't matter
+        files_data = [(uf.name, uf.read()) for uf in uploaded_files]
+
         # --- Step 1: raw preview van eerste bestand ---
         st.subheader("Stap 1 – Ruwe data (eerste bestand)")
-        first_file = uploaded_files[0]
+        first_name, first_bytes = files_data[0]
         try:
-            raw_df = load_raw(first_file.read(), first_file.name)
-            first_file.seek(0)
+            raw_df = load_raw(first_bytes, first_name)
         except Exception as e:
             st.error(f"Kon het bestand niet inladen: {e}")
             st.stop()
@@ -106,20 +108,24 @@ with tab_upload:
 
         all_file_results = []
         errors = []
-        for uf in uploaded_files:
+        for fname, fbytes in files_data:
             try:
-                fb = uf.read()
-                rdf = load_raw(fb, uf.name)
+                rdf = load_raw(fbytes, fname)
                 fdf = apply_header(rdf, int(header_row))
+                # Validate that required columns exist in this file
+                missing = [c for c in [group_col_sel, name_col_sel, time_col] if c and c not in fdf.columns]
+                if missing:
+                    errors.append(f"**{fname}**: kolommen niet gevonden: {missing} (beschikbaar: {list(fdf.columns)[:8]}…)")
+                    continue
                 grps = parse_groups(fdf, time_col, group_col_sel, name_col_sel)
-                detected_date = try_parse_date_from_filename(uf.name)
+                detected_date = try_parse_date_from_filename(fname)
                 all_file_results.append({
-                    "filename": uf.name,
+                    "filename": fname,
                     "groups": grps,
                     "detected_date": detected_date,
                 })
             except Exception as e:
-                errors.append(f"**{uf.name}**: {e}")
+                errors.append(f"**{fname}**: {e}")
 
         if errors:
             for err in errors:
@@ -130,15 +136,22 @@ with tab_upload:
         if not all_file_results or total_groups == 0:
             st.warning("Geen geldige groepen gevonden. Controleer de kolommen.")
         else:
+            # Per-file summary
+            summary_rows = [
+                {"Bestand": r["filename"], "Groepen": len(r["groups"])}
+                for r in all_file_results
+            ]
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
             # Preview eerste 5 groepen van eerste bestand
             preview_rows = []
             for g in all_file_results[0]["groups"][:5]:
                 preview_rows.append({
-                    "Bestand": all_file_results[0]["filename"],
                     "Tijd": g["tee_time"] or "–",
                     "Spelers": ", ".join(display_name(p) for p in g["players"]),
                 })
-            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+            st.caption(f"Eerste 5 groepen uit '{all_file_results[0]['filename']}':")
+            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
             st.info(
                 f"Totaal: **{total_groups} groepen** in **{len(all_file_results)} bestand(en)**."
             )
