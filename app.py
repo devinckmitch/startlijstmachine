@@ -33,8 +33,8 @@ with tab_upload:
     st.header("Startlijst importeren")
 
     uploaded_file = st.file_uploader(
-        "Kies een Excel-startlijst (.xlsx of .xls)",
-        type=["xlsx", "xls"],
+        "Kies een startlijst (.xlsx, .xls of .csv)",
+        type=["xlsx", "xls", "csv"],
         key="uploader",
     )
 

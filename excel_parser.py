@@ -30,6 +30,16 @@ def try_parse_date_from_filename(filename: str) -> str | None:
 
 def load_raw(file_bytes: bytes, filename: str) -> pd.DataFrame:
     ext = filename.rsplit(".", 1)[-1].lower()
+    if ext == "csv":
+        # Try common delimiters used in Belgian/Dutch exports
+        for sep in [";", ",", "\t"]:
+            try:
+                df = pd.read_csv(BytesIO(file_bytes), header=None, sep=sep, encoding="utf-8-sig")
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
+        return pd.read_csv(BytesIO(file_bytes), header=None, encoding="utf-8-sig")
     engine = "openpyxl" if ext == "xlsx" else "xlrd"
     return pd.read_excel(BytesIO(file_bytes), header=None, engine=engine)
 
