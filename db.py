@@ -2,7 +2,9 @@ import sqlite3
 import os
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "startlijst.db"
+# On Streamlit Cloud the app directory is read-only; use the home dir instead.
+# Locally this resolves to ~/.startlijstmachine/startlijst.db.
+DB_PATH = Path.home() / ".startlijstmachine" / "startlijst.db"
 
 
 def get_connection() -> sqlite3.Connection:
