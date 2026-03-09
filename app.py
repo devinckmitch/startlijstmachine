@@ -20,11 +20,191 @@ st.set_page_config(page_title="Startlijstmachine", page_icon="⛳", layout="wide
 db.init_db()
 
 st.title("⛳ Startlijstmachine")
-st.caption("Upload golf-startlijsten, ontdek speelpartners en teetime-voorkeuren.")
 
-tab_upload, tab_history, tab_search, tab_samen, tab_info = st.tabs(
-    ["📤 Upload", "📋 Geschiedenis", "🔍 Zoeken", "🤝 Wie samen?", "ℹ️ Info"]
+# Tab-volgorde: dagelijks gebruik eerst, setup/beheer achteraan
+tab_batch, tab_search, tab_samen, tab_upload, tab_history, tab_info = st.tabs(
+    ["🎯 Suggesties", "🔍 Zoeken", "🤝 Wie samen?", "📤 Upload", "📋 Geschiedenis", "ℹ️ Info"]
 )
+
+# ---------------------------------------------------------------------------
+# TAB: BATCH SUGGESTIES
+# ---------------------------------------------------------------------------
+with tab_batch:
+    st.header("Batch suggesties")
+    st.caption(
+        "Plak de namen van de overblijvende spelers (één per lijn). "
+        "Per speler krijg je de meest frequente speelpartners uit de historiek."
+    )
+
+    all_players_batch = db.get_all_players()
+
+    if not all_players_batch:
+        st.info("Nog geen spelers in de database. Importeer eerst startlijsten via het **Upload**-tabblad.")
+    else:
+        col_input, col_settings = st.columns([3, 1])
+        with col_input:
+            names_input = st.text_area(
+                "Namen (één per lijn)",
+                height=180,
+                placeholder="Adams Karl\nPeeters Luc\nBouckaert Cedric",
+            )
+        with col_settings:
+            n_suggestions = st.number_input(
+                "Suggesties per speler",
+                min_value=1,
+                max_value=20,
+                value=5,
+                step=1,
+            )
+            st.caption(f"**{len(all_players_batch)}** spelers in database")
+
+        run_batch = st.button("🔍 Zoek suggesties", type="primary", disabled=not names_input.strip())
+
+        if run_batch and names_input.strip():
+            input_names = [n.strip() for n in names_input.splitlines() if n.strip()]
+
+            st.divider()
+            st.subheader(f"Resultaten voor {len(input_names)} naam/namen")
+
+            for raw_name in input_names:
+                candidates = analysis.find_player_candidates(raw_name, all_players_batch)
+
+                if not candidates:
+                    st.warning(f"**{raw_name}** — niet gevonden in de database.")
+                    continue
+
+                matched = candidates[0]
+                matched_label = display_name(matched)
+                name_note = f" *(gevonden als: {matched_label})*" if normalise_name(raw_name) != matched else ""
+
+                partner_data = analysis.get_partner_table(matched)
+                top = partner_data[:n_suggestions]
+
+                with st.container(border=True):
+                    st.markdown(f"### {display_name(matched)}{name_note}")
+
+                    if len(candidates) > 1:
+                        other = ", ".join(display_name(c) for c in candidates[1:4])
+                        st.caption(f"Andere mogelijke matches: {other}")
+
+                    if not top:
+                        st.info("Geen speelpartners gevonden voor deze speler.")
+                    else:
+                        st.dataframe(
+                            pd.DataFrame(top),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+# ---------------------------------------------------------------------------
+# TAB: ZOEKEN (individueel)
+# ---------------------------------------------------------------------------
+with tab_search:
+    st.header("Zoek een speler")
+    st.caption("Gedetailleerd overzicht van één speler: partners, teetimes en volledige historiek.")
+
+    all_players = db.get_all_players()
+
+    if not all_players:
+        st.info("Nog geen spelers in de database. Importeer eerst startlijsten via het **Upload**-tabblad.")
+    else:
+        search_input = st.text_input("Naam (of deel van naam)", placeholder="bijv. Adams")
+
+        if search_input:
+            candidates = analysis.find_player_candidates(search_input, all_players)
+
+            if not candidates:
+                st.warning("Geen spelers gevonden. Probeer een andere zoekopdracht.")
+            else:
+                selected = st.selectbox(
+                    "Selecteer speler",
+                    candidates,
+                    format_func=display_name,
+                )
+
+                if selected:
+                    st.subheader(f"Resultaten voor {display_name(selected)}")
+
+                    col_left, col_right = st.columns(2)
+
+                    with col_left:
+                        st.markdown("#### Meest frequente speelpartners")
+                        partner_data = analysis.get_partner_table(selected)
+                        if partner_data:
+                            st.dataframe(
+                                pd.DataFrame(partner_data),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.info("Geen speelpartners gevonden.")
+
+                    with col_right:
+                        st.markdown("#### Teetime-voorkeur per uur")
+                        hour_data = analysis.get_tee_time_by_hour(selected)
+                        if hour_data:
+                            hour_df = pd.DataFrame(hour_data).set_index("Uur")
+                            st.bar_chart(hour_df["Keer gespeeld"])
+
+                            with st.expander("Bekijk per exact tijdstip"):
+                                tee_data = analysis.get_tee_time_table(selected)
+                                st.dataframe(
+                                    pd.DataFrame(tee_data),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                        else:
+                            st.info("Geen teetime-data beschikbaar.")
+
+                    with st.expander("Alle rondes"):
+                        player_rounds = db.get_player_rounds(selected)
+                        if not player_rounds:
+                            st.info("Geen rondes gevonden.")
+                        else:
+                            for pr in player_rounds:
+                                datum = pr["round_date"] or "datum onbekend"
+                                tijd = pr["tee_time"] or pr["slot_label"] or "–"
+                                partners = "  ·  ".join(display_name(p) for p in pr["co_players"]) or "–"
+                                st.markdown(
+                                    f"**{datum}** &nbsp; {tijd} &nbsp; — &nbsp; {pr['filename']}  \n"
+                                    f"<small>Flight met: {partners}</small>",
+                                    unsafe_allow_html=True,
+                                )
+
+# ---------------------------------------------------------------------------
+# TAB: WIE SPEELT GOED SAMEN?
+# ---------------------------------------------------------------------------
+with tab_samen:
+    st.header("Wie speelt goed samen?")
+    st.caption("Selecteer 2 of meer spelers en zie hoe vaak elk koppel samen in een flight stond.")
+
+    all_players_samen = db.get_all_players()
+
+    if not all_players_samen:
+        st.info("Nog geen spelers in de database. Importeer eerst startlijsten via het **Upload**-tabblad.")
+    else:
+        selected_players = st.multiselect(
+            "Kies spelers",
+            options=all_players_samen,
+            format_func=display_name,
+            placeholder="Typ een naam om te zoeken…",
+        )
+
+        if len(selected_players) < 2:
+            st.info("Selecteer minimaal 2 spelers.")
+        else:
+            pair_data = analysis.get_pair_frequencies(selected_players)
+            if not pair_data:
+                st.warning("Deze spelers hebben nog nooit samen in een flight gestaan.")
+            else:
+                st.dataframe(
+                    pd.DataFrame(pair_data),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                chart_df = pd.DataFrame(pair_data)
+                chart_df["Koppel"] = chart_df["Speler 1"] + " & " + chart_df["Speler 2"]
+                st.bar_chart(chart_df.set_index("Koppel")["Keer samen"])
 
 # ---------------------------------------------------------------------------
 # TAB: UPLOAD
@@ -210,15 +390,21 @@ with tab_upload:
                 st.balloons()
 
 # ---------------------------------------------------------------------------
-# TAB: HISTORY
+# TAB: GESCHIEDENIS
 # ---------------------------------------------------------------------------
 with tab_history:
     st.header("Geïmporteerde rondes")
 
     rounds = db.get_rounds_summary()
     if not rounds:
-        st.info("Nog geen rondes geïmporteerd. Gebruik het Upload-tabblad.")
+        st.info("Nog geen rondes geïmporteerd. Gebruik het **Upload**-tabblad.")
     else:
+        total_rounds = len(rounds)
+        total_members = sum(r["num_members"] for r in rounds)
+        total_groups = sum(r["num_groups"] for r in rounds)
+        st.caption(f"**{total_rounds}** rondes · **{total_groups}** flights · **{total_members}** deelnames in totaal")
+        st.divider()
+
         for r in rounds:
             datum = r["round_date"] or "datum onbekend"
             col_a, col_b = st.columns([5, 1])
@@ -241,116 +427,6 @@ with tab_history:
             st.divider()
 
 # ---------------------------------------------------------------------------
-# TAB: SEARCH
-# ---------------------------------------------------------------------------
-with tab_search:
-    st.header("Zoek een speler")
-
-    all_players = db.get_all_players()
-
-    if not all_players:
-        st.info("Nog geen spelers in de database. Upload eerst een startlijst.")
-    else:
-        search_input = st.text_input("Naam (of deel van naam)", placeholder="bijv. Adams")
-
-        if search_input:
-            candidates = analysis.find_player_candidates(search_input, all_players)
-
-            if not candidates:
-                st.warning("Geen spelers gevonden. Probeer een andere zoekopdracht.")
-            else:
-                selected = st.selectbox(
-                    "Selecteer speler",
-                    candidates,
-                    format_func=display_name,
-                )
-
-                if selected:
-                    st.subheader(f"Resultaten voor {display_name(selected)}")
-
-                    col_left, col_right = st.columns(2)
-
-                    with col_left:
-                        st.markdown("#### Meest frequente speelpartners")
-                        partner_data = analysis.get_partner_table(selected)
-                        if partner_data:
-                            st.dataframe(
-                                pd.DataFrame(partner_data),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("Geen speelpartners gevonden.")
-
-                    with col_right:
-                        st.markdown("#### Teetime-voorkeur per uur")
-                        hour_data = analysis.get_tee_time_by_hour(selected)
-                        if hour_data:
-                            hour_df = pd.DataFrame(hour_data).set_index("Uur")
-                            st.bar_chart(hour_df["Keer gespeeld"])
-
-                            with st.expander("Bekijk per exact tijdstip"):
-                                tee_data = analysis.get_tee_time_table(selected)
-                                st.dataframe(
-                                    pd.DataFrame(tee_data),
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                        else:
-                            st.info("Geen teetime-data beschikbaar.")
-
-                    st.markdown("#### Alle rondes")
-                    player_rounds = db.get_player_rounds(selected)
-                    if not player_rounds:
-                        st.info("Geen rondes gevonden.")
-                    else:
-                        for pr in player_rounds:
-                            datum = pr["round_date"] or "datum onbekend"
-                            tijd = pr["tee_time"] or pr["slot_label"] or "–"
-                            partners = "  ·  ".join(display_name(p) for p in pr["co_players"]) or "–"
-                            st.markdown(
-                                f"**{datum}** &nbsp; {tijd} &nbsp; — &nbsp; {pr['filename']}  \n"
-                                f"<small>Flight met: {partners}</small>",
-                                unsafe_allow_html=True,
-                            )
-
-# ---------------------------------------------------------------------------
-# TAB: WIE SPEELT GOED SAMEN?
-# ---------------------------------------------------------------------------
-with tab_samen:
-    st.header("Wie speelt goed samen?")
-    st.caption("Selecteer 2 of meer spelers en zie hoe vaak elk koppel samen in een flight stond.")
-
-    all_players_samen = db.get_all_players()
-
-    if not all_players_samen:
-        st.info("Nog geen spelers in de database. Upload eerst een startlijst.")
-    else:
-        selected_players = st.multiselect(
-            "Kies spelers",
-            options=all_players_samen,
-            format_func=display_name,
-            placeholder="Typ een naam om te zoeken…",
-        )
-
-        if len(selected_players) < 2:
-            st.info("Selecteer minimaal 2 spelers.")
-        else:
-            pair_data = analysis.get_pair_frequencies(selected_players)
-            if not pair_data:
-                st.warning("Deze spelers hebben nog nooit samen in een flight gestaan.")
-            else:
-                st.dataframe(
-                    pd.DataFrame(pair_data),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                # Visual: bar chart per pair
-                chart_df = pd.DataFrame(pair_data)
-                chart_df["Koppel"] = chart_df["Speler 1"] + " & " + chart_df["Speler 2"]
-                st.bar_chart(chart_df.set_index("Koppel")["Keer samen"])
-
-# ---------------------------------------------------------------------------
 # TAB: INFO
 # ---------------------------------------------------------------------------
 with tab_info:
@@ -363,12 +439,12 @@ with tab_info:
 
 ---
 
-### Hoe werkt het?
+### Typische workflow
 
-1. **Upload** een startlijst (.xlsx, .xls of .csv)
-2. Koppel de juiste kolommen (teetime, groepsnummer, naam)
-3. **Zoek** op een speler om de resultaten te zien
-4. Gebruik **Wie samen?** om meerdere spelers te vergelijken
+1. **Upload** startlijsten van voorbije rondes (eenmalig / periodiek)
+2. Gebruik **Suggesties** als je een lijst overblijvende spelers hebt → plak namen, krijg top-partners
+3. Gebruik **Zoeken** voor een diepgaand overzicht van één speler
+4. Gebruik **Wie samen?** om specifieke combinaties te vergelijken
 
 ---
 
